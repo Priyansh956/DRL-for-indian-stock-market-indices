@@ -28,5 +28,9 @@ dependencies = [
     "pandas",
     "gymnasium",
     "stable-baselines3",
-    "torch"
+    "torch",
+    "yfinance"
 ]
+
+[tool.setuptools]
+packages = ["data", "envs"]
