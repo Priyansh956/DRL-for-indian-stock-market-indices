@@ -1,9 +1,0 @@
-pyproject.toml
-envs/__init__.py
-envs/india_trading_env.py
-nifty_drl.egg-info/PKG-INFO
-nifty_drl.egg-info/SOURCES.txt
-nifty_drl.egg-info/dependency_links.txt
-nifty_drl.egg-info/requires.txt
-nifty_drl.egg-info/top_level.txt
-tests/test_env.py
