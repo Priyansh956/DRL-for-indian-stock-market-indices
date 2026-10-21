@@ -1,5 +1,5 @@
 [tool.ruff]
-line-length = 100
+line-length = 150
 target-version = "py312"
 
 [tool.ruff.lint]
@@ -28,5 +28,9 @@ dependencies = [
     "pandas",
     "gymnasium",
     "stable-baselines3",
-    "torch"
+    "torch",
+    "yfinance"
 ]
+
+[tool.setuptools]
+packages = ["data", "envs"]

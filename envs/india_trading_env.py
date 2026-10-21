@@ -29,9 +29,7 @@ class IndiaMarketTradingEnv(gym.Env):
         self.action_space = spaces.Box(low=0, high=1, shape=(self.n_assets,), dtype=np.float32)
 
         # State space: Technical indicators + current portfolio weights
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.n_features + self.n_assets,), dtype=np.float32
-        )
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.n_features + self.n_assets,), dtype=np.float32)
 
         self.reset()
 
