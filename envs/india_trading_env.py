@@ -1,7 +1,7 @@
 import gymnasium as gym
-from gymnasium import spaces
 import numpy as np
 import pandas as pd
+from gymnasium import spaces
 
 
 class IndiaMarketTradingEnv(gym.Env):
@@ -17,7 +17,7 @@ class IndiaMarketTradingEnv(gym.Env):
         price_matrix: pd.DataFrame,
         transaction_cost_pct: float = 0.001,
     ):
-        super(IndiaMarketTradingEnv, self).__init__()
+        super().__init__()
 
         self.df_features = df_features.values
         self.prices = price_matrix.values
