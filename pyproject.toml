@@ -29,7 +29,8 @@ dependencies = [
     "gymnasium",
     "stable-baselines3",
     "torch",
-    "yfinance"
+    "yfinance",
+    "matplotlib"
 ]
 
 [tool.setuptools]
