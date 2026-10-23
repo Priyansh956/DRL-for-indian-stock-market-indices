@@ -120,3 +120,48 @@ class DataPreprocessor:
         prices = feature_df[["Adj Close"]]
 
         return features, prices
+
+    def get_train_test_data(
+        self,
+        split_date: str = "2024-01-01",
+    ) -> tuple[tuple[pd.DataFrame, pd.DataFrame], tuple[pd.DataFrame, pd.DataFrame]]:
+        """Splits data chronologically into train and test sets, fitting normalization
+
+        statistics (mean and std) strictly on the training period to prevent look-ahead bias.
+        """
+        raw_df = self.fetch_data()
+        feature_df = self.compute_technical_indicators(raw_df)
+
+        feature_columns = [
+            "RSI",
+            "MACD",
+            "MACD_Signal",
+            "ATR",
+            "Rolling_Vol",
+            "VIX",
+        ]
+
+        # Chronological split by date
+        split_dt = pd.to_datetime(split_date)
+        train_mask = feature_df.index < split_dt
+        test_mask = feature_df.index >= split_dt
+
+        train_raw_features = feature_df.loc[train_mask, feature_columns]
+        test_raw_features = feature_df.loc[test_mask, feature_columns]
+
+        if train_raw_features.empty or test_raw_features.empty:
+            raise ValueError(
+                f"Split date '{split_date}' resulted in empty train ({len(train_raw_features)}) or test ({len(test_raw_features)}) dataset."
+            )
+
+        # Standardize features using training statistics ONLY
+        train_mean = train_raw_features.mean()
+        train_std = train_raw_features.std() + 1e-8
+
+        train_features = (train_raw_features - train_mean) / train_std
+        test_features = (test_raw_features - train_mean) / train_std
+
+        train_prices = feature_df.loc[train_mask, ["Adj Close"]]
+        test_prices = feature_df.loc[test_mask, ["Adj Close"]]
+
+        return (train_features, train_prices), (test_features, test_prices)
