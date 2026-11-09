@@ -225,9 +225,9 @@ class IndiaMarketTradingEnv(gym.Env):
             # return float(np.clip(sharpe, -10.0, 10.0))
 
             # --- IMPROVISED SORTINO RATIO (ACTIVE) ---
-            # 1. Define Minimum Acceptable Return (MAR). 
+            # 1. Define Minimum Acceptable Return (MAR).
             # In finance, MAR is often the risk-free rate, but 0 is standard for daily DRL.
-            mar = 0.0 
+            mar = 0.0
 
             # 2. Calculate Downside Deviations (How much each day fell below MAR)
             # We use np.maximum to isolate only the negative deviations
@@ -235,13 +235,13 @@ class IndiaMarketTradingEnv(gym.Env):
 
             # 3. Calculate Semi-Deviation (The mathematically correct Sortino denominator)
             # Formula: sqrt( mean( downside_deviations^2 ) )
-            squared_downside = downside_deviations ** 2
+            squared_downside = downside_deviations**2
             semi_deviation = float(np.sqrt(np.mean(squared_downside)))
 
             # 4. Smoothing Factor (Epsilon)
-            # This is the "Improvisation". It prevents division by zero and stops 
+            # This is the "Improvisation". It prevents division by zero and stops
             # the reward from exploding during low-volatility bull markets.
-            epsilon = 1e-4 
+            epsilon = 1e-4
 
             # 5. Calculate Sortino
             sortino = mean_return / (semi_deviation + epsilon)
@@ -251,7 +251,7 @@ class IndiaMarketTradingEnv(gym.Env):
 
         # Insufficient return history: use immediate net return
         return float(current_return)
-   
+
     def render(self) -> None:
         if self.render_mode == "human" or self.render_mode is None:
             print(f"Step: {self.current_step} | Portfolio Value: ₹{self.portfolio_value:,.2f} | Weights: {np.round(self.weights, 4)}")
