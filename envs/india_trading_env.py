@@ -213,18 +213,41 @@ class IndiaMarketTradingEnv(gym.Env):
         return obs, float(reward), terminated, truncated, info
 
     def _calculate_reward(self, current_return: float) -> float:
-        """Calculates risk-adjusted reward based on rolling Sharpe ratio approximation."""
+        """Calculates risk-adjusted reward based on an IMPROVISED rolling Sortino ratio."""
         if len(self.portfolio_returns) >= self.reward_window:
             recent_returns = np.array(self.portfolio_returns[-self.reward_window :], dtype=np.float64)
-            mean = float(np.mean(recent_returns))
-            std = float(np.std(recent_returns))
+            mean_return = float(np.mean(recent_returns))
 
-            if std < 1e-8:
-                # Handle zero volatility safely without division explosion
-                return float(np.clip(mean, -1.0, 1.0))
+            # --- SHARPE RATIO (COMMENTED OUT) ---
+            # std = float(np.std(recent_returns))
+            # if std < 1e-8: return float(np.clip(mean_return, -1.0, 1.0))
+            # sharpe = mean_return / std
+            # return float(np.clip(sharpe, -10.0, 10.0))
 
-            sharpe = mean / std
-            return float(np.clip(sharpe, -10.0, 10.0))
+            # --- IMPROVISED SORTINO RATIO (ACTIVE) ---
+            # 1. Define Minimum Acceptable Return (MAR).
+            # In finance, MAR is often the risk-free rate, but 0 is standard for daily DRL.
+            mar = 0.0
+
+            # 2. Calculate Downside Deviations (How much each day fell below MAR)
+            # We use np.maximum to isolate only the negative deviations
+            downside_deviations = np.maximum(mar - recent_returns, 0.0)
+
+            # 3. Calculate Semi-Deviation (The mathematically correct Sortino denominator)
+            # Formula: sqrt( mean( downside_deviations^2 ) )
+            squared_downside = downside_deviations**2
+            semi_deviation = float(np.sqrt(np.mean(squared_downside)))
+
+            # 4. Smoothing Factor (Epsilon)
+            # This is the "Improvisation". It prevents division by zero and stops
+            # the reward from exploding during low-volatility bull markets.
+            epsilon = 1e-4
+
+            # 5. Calculate Sortino
+            sortino = mean_return / (semi_deviation + epsilon)
+
+            # 6. Clip the reward to stabilize PPO neural network training
+            return float(np.clip(sortino, -5.0, 5.0))
 
         # Insufficient return history: use immediate net return
         return float(current_return)
