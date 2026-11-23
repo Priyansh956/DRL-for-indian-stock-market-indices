@@ -237,6 +237,59 @@ def test_include_cash_allocation():
     check_env(env)
 
 
+def test_calculate_indian_market_friction_asymmetry():
+    from envs.india_trading_env import calculate_indian_market_friction
+
+    # Buy only: ₹100,000 buy, ₹0 sell
+    cost_buy, breakdown_buy = calculate_indian_market_friction(buy_value=100000.0, sell_value=0.0)
+    assert breakdown_buy["stt"] == 0.0  # STT is sell only
+    assert np.isclose(breakdown_buy["stamp_duty"], 15.0)  # 0.015% of 100k
+    assert np.isclose(breakdown_buy["brokerage"], 20.0)  # 0.02% of 100k
+    assert np.isclose(breakdown_buy["exchange_fee"], 3.25)  # 0.00325% of 100k
+    assert np.isclose(breakdown_buy["sebi_fee"], 0.10)  # 0.0001% of 100k
+    service_charges_buy = 20.0 + 3.25 + 0.10
+    assert np.isclose(breakdown_buy["gst"], service_charges_buy * 0.18)
+    assert np.isclose(cost_buy, 15.0 + service_charges_buy * 1.18)
+
+    # Sell only: ₹0 buy, ₹100,000 sell
+    cost_sell, breakdown_sell = calculate_indian_market_friction(buy_value=0.0, sell_value=100000.0)
+    assert np.isclose(breakdown_sell["stt"], 100.0)  # 0.1% STT on sell
+    assert breakdown_sell["stamp_duty"] == 0.0  # Stamp duty is buy only
+    assert np.isclose(breakdown_sell["brokerage"], 20.0)
+    assert np.isclose(breakdown_sell["exchange_fee"], 3.25)
+    assert np.isclose(breakdown_sell["sebi_fee"], 0.10)
+    service_charges_sell = 20.0 + 3.25 + 0.10
+    assert np.isclose(breakdown_sell["gst"], service_charges_sell * 0.18)
+    assert np.isclose(cost_sell, 100.0 + service_charges_sell * 1.18)
+
+    # Selling has higher friction than buying due to STT asymmetry
+    assert cost_sell > cost_buy
+
+
+def test_env_with_indian_market_friction():
+    features = pd.DataFrame(np.zeros((3, 2)))
+    # Day 0: [100, 100], Day 1: [100, 100], Day 2: [100, 100] (flat prices)
+    prices = pd.DataFrame([[100.0, 100.0], [100.0, 100.0], [100.0, 100.0]])
+
+    env = IndiaMarketTradingEnv(
+        features,
+        prices,
+        initial_capital=100000.0,
+        use_indian_friction=True,
+    )
+    env.reset()
+    # At reset: weights = [1.0, 0.0]. We switch 50% to asset 1: sell 50k of asset 0, buy 50k of asset 1
+    obs, reward, terminated, truncated, info = env.step(np.array([0.5, 0.5]))
+
+    assert "friction_breakdown" in info
+    fb = info["friction_breakdown"]
+    assert np.isclose(fb["stt"], 50000.0 * 0.001)  # STT on 50k sold
+    assert np.isclose(fb["stamp_duty"], 50000.0 * 0.00015)  # Stamp duty on 50k bought
+    assert info["transaction_cost"] == fb["total_friction"]
+    assert env.portfolio_value < 100000.0
+
+
+
 def test_performance_metrics_calculation():
     from envs.metrics import calculate_performance_metrics
 

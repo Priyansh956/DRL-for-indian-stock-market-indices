@@ -8,6 +8,70 @@ import pandas as pd
 from gymnasium import spaces
 
 
+def calculate_indian_market_friction(
+    buy_value: float,
+    sell_value: float,
+    stt_rate: float = 0.001,
+    stamp_duty_rate: float = 0.00015,
+    brokerage_rate: float = 0.0002,
+    exchange_rate: float = 0.0000325,
+    sebi_rate: float = 0.000001,
+    gst_rate: float = 0.18,
+) -> tuple[float, dict[str, float]]:
+    """Calculates realistic asymmetric Indian market trading frictions.
+
+    Components:
+        - STT (Securities Transaction Tax): 0.1% on SELL turnover only (equity delivery).
+        - Stamp Duty: 0.015% on BUY turnover only.
+        - Brokerage: Commission on total turnover (buy + sell).
+        - Exchange & SEBI charges: Regulatory fees on turnover.
+        - GST: 18% on service charges (brokerage + exchange charges + SEBI charges).
+
+    Args:
+        buy_value: Total rupee value of asset purchases.
+        sell_value: Total rupee value of asset sales.
+        stt_rate: STT rate applied only to sell_value (default: 0.001 / 0.1%).
+        stamp_duty_rate: Stamp duty rate applied only to buy_value (default: 0.00015 / 0.015%).
+        brokerage_rate: Brokerage rate applied to total turnover (default: 0.0002 / 0.02%).
+        exchange_rate: Exchange transaction fee rate (default: 0.0000325 / 0.00325%).
+        sebi_rate: SEBI turnover fee rate (default: 0.000001 / 0.0001%).
+        gst_rate: Goods and Services Tax rate applied to service charges (default: 0.18 / 18%).
+
+    Returns:
+        total_cost: Total rupee cost of all frictions.
+        breakdown: Dictionary detailing each friction component.
+    """
+    buy_val = max(0.0, float(buy_value))
+    sell_val = max(0.0, float(sell_value))
+    turnover = buy_val + sell_val
+
+    # Asymmetric regulatory taxes
+    stt = sell_val * float(stt_rate)
+    stamp_duty = buy_val * float(stamp_duty_rate)
+
+    # Turnover service fees
+    brokerage = turnover * float(brokerage_rate)
+    exchange_fee = turnover * float(exchange_rate)
+    sebi_fee = turnover * float(sebi_rate)
+
+    # GST on service charges
+    service_charges = brokerage + exchange_fee + sebi_fee
+    gst = service_charges * float(gst_rate)
+
+    total_cost = stt + stamp_duty + service_charges + gst
+
+    breakdown = {
+        "stt": float(stt),
+        "stamp_duty": float(stamp_duty),
+        "brokerage": float(brokerage),
+        "exchange_fee": float(exchange_fee),
+        "sebi_fee": float(sebi_fee),
+        "gst": float(gst),
+        "total_friction": float(total_cost),
+    }
+    return float(total_cost), breakdown
+
+
 class IndiaMarketTradingEnv(gym.Env):
     """Custom Gymnasium Environment for Risk-Adjusted DRL Trading on Indian Indices.
 
@@ -32,6 +96,7 @@ class IndiaMarketTradingEnv(gym.Env):
         initial_capital: float = 100000.0,
         reward_window: int = 20,
         include_cash: bool = False,
+        use_indian_friction: bool = False,
         render_mode: str | None = None,
     ):
         super().__init__()
@@ -71,6 +136,7 @@ class IndiaMarketTradingEnv(gym.Env):
         self.tc = float(transaction_cost_pct)
         self.initial_capital = float(initial_capital)
         self.reward_window = int(reward_window)
+        self.use_indian_friction = bool(use_indian_friction)
         self.render_mode = render_mode
 
         # Action space: Portfolio weights (Continuous simplex in [0, 1])
@@ -167,7 +233,17 @@ class IndiaMarketTradingEnv(gym.Env):
 
         # Calculate turnover and transaction cost friction
         turnover = float(np.sum(np.abs(target_weights - self.weights)))
-        cost = turnover * self.tc * self.portfolio_value
+
+        if self.use_indian_friction:
+            # When cash is included, cash asset (last column) is exempt from STT/stamp duty
+            risky_end = (self.n_assets - 1) if self.include_cash else self.n_assets
+            risky_delta = target_weights[:risky_end] - self.weights[:risky_end]
+            buy_val = float(np.sum(np.maximum(risky_delta, 0.0))) * self.portfolio_value
+            sell_val = float(np.sum(np.maximum(-risky_delta, 0.0))) * self.portfolio_value
+            cost, friction_breakdown = calculate_indian_market_friction(buy_val, sell_val)
+        else:
+            cost = turnover * self.tc * self.portfolio_value
+            friction_breakdown = {}
 
         # Move to next price step
         self.current_step += 1
@@ -209,6 +285,8 @@ class IndiaMarketTradingEnv(gym.Env):
             "weights": self.weights.copy(),
             "reward": float(reward),
         }
+        if self.use_indian_friction:
+            info["friction_breakdown"] = friction_breakdown
 
         return obs, float(reward), terminated, truncated, info
 
