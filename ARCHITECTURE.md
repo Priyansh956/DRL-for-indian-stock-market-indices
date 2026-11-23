@@ -67,13 +67,13 @@ Rows with missing indicator values are then dropped. The model's feature list is
 
 - **Observation:** Current feature row concatenated with current portfolio weights.
 - **Action:** A continuous target allocation vector. Negative entries are clipped and non-zero actions are normalized to sum to one. Invalid or all-zero vectors use a safe fallback.
-- **Assets:** With `include_cash=True` and one input price column, a constant price-1.0 cash column is added. The training script enables this, creating NIFTY and cash allocations.
+- **Assets:** With `include_cash=True` and one input price column, an interest-bearing cash column is added compounding at daily risk-free rate: $1.0 \times (1 + r_f/252)^t$ (default annual $r_f = 6.5\%$). The training script enables this, creating NIFTY and interest-bearing cash allocations.
 - **Transition:** A step moves from the current price row to the next row, and the target allocation is applied to that next-period return.
-- **Trading friction:** Turnover is the sum of absolute allocation changes. The transaction-cost amount is turnover multiplied by the configured cost percentage and current portfolio value.
-- **Reward:** For the first `reward_window - 1` returns, reward is the current net return. Once enough returns exist, reward is the mean divided by standard deviation of the rolling returns, clipped to `[-10, 10]`; zero volatility is handled separately.
+- **Trading friction:** Supports standard percentage turnover cost and realistic asymmetric Indian market frictions (`calculate_indian_market_friction`): Securities Transaction Tax (STT, 0.1% on sell only), Stamp Duty (0.015% on buy only), Brokerage, Exchange & SEBI fees, and 18% GST on service charges.
+- **Reward:** Direct optimization of terminal wealth penalized by full-period Conditional Value at Risk (CVaR / Expected Shortfall). In differential mode, step rewards telescope such that their cumulative sum over the episode identically equals terminal wealth return minus risk penalty $\lambda \times \text{CVaR}_\alpha(R_{1:T})$.
 - **Episode:** Ends at the final available price row or if portfolio value reaches zero.
 
-The environment starts with a 100% allocation to the first asset. This means the first transition from the default allocation to a new target can itself incur turnover/cost. The cash proxy has no yield and is not a model of a real cash product.
+The environment starts with a 100% allocation to the first asset. This means the first transition from the default allocation to a new target can itself incur turnover/cost. The cash proxy models an interest-bearing risk-free asset compounding at 6.5% annually.
 
 ### `train.py`
 
@@ -93,7 +93,7 @@ Evaluation uses the trained policy's actions but does not update the policy. Tra
 
 ### `envs/metrics.py`
 
-This module computes cumulative return, maximum drawdown, annualized Sharpe ratio, and annualized Sortino ratio. The risk-free rate defaults to zero and annualization uses 252 periods per year. The reward used for learning is distinct from these final evaluation metrics.
+This module computes cumulative return, maximum drawdown, annualized Sharpe ratio, annualized Sortino ratio, and Conditional Value at Risk (CVaR / Expected Shortfall). The risk-free rate defaults to zero and annualization uses 252 periods per year. The environment reward directly optimizes terminal wealth penalized by full-period CVaR, aligning training with evaluation.
 
 ## Runtime data and outputs
 

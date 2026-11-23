@@ -57,10 +57,30 @@ def calculate_sortino_ratio(
     return float(np.sqrt(periods_per_year) * (mean_excess / downside_std))
 
 
+def calculate_cvar(
+    returns: np.ndarray,
+    alpha: float = 0.05,
+) -> float:
+    """Calculates Conditional Value at Risk (CVaR / Expected Shortfall) at confidence alpha.
+
+    Returns the expected tail loss in percentage in the worst alpha fraction of periods.
+    """
+    rets = np.asarray(returns, dtype=np.float64)
+    if len(rets) == 0:
+        return 0.0
+    losses = -rets
+    cutoff = float(np.percentile(losses, (1.0 - alpha) * 100.0))
+    tail_losses = losses[losses >= cutoff]
+    if len(tail_losses) == 0:
+        return float(max(0.0, cutoff * 100.0))
+    return float(max(0.0, np.mean(tail_losses) * 100.0))
+
+
 def calculate_performance_metrics(
     portfolio_values: np.ndarray,
     returns: np.ndarray,
     risk_free_rate: float = 0.0,
+    cvar_alpha: float = 0.05,
 ) -> dict[str, float]:
     """Computes a dictionary of standard portfolio performance metrics."""
     return {
@@ -68,4 +88,5 @@ def calculate_performance_metrics(
         "max_drawdown_pct": calculate_max_drawdown(portfolio_values),
         "annualized_sharpe": calculate_sharpe_ratio(returns, risk_free_rate=risk_free_rate),
         "annualized_sortino": calculate_sortino_ratio(returns, risk_free_rate=risk_free_rate),
+        "cvar_pct": calculate_cvar(returns, alpha=cvar_alpha),
     }

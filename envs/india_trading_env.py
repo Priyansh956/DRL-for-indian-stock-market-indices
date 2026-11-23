@@ -8,6 +8,98 @@ import pandas as pd
 from gymnasium import spaces
 
 
+def calculate_cvar(
+    returns: list[float] | np.ndarray,
+    alpha: float = 0.05,
+) -> float:
+    """Calculates full-period Conditional Value at Risk (CVaR / Expected Shortfall).
+
+    Defined as the expected loss in the worst alpha fraction of return periods.
+    Returns expected tail loss as a non-negative float.
+
+    Args:
+        returns: Sequence of periodic portfolio returns.
+        alpha: Risk quantile level (default: 0.05 for worst 5% tail).
+
+    Returns:
+        float: Expected tail loss (non-negative float, e.g. 0.03 for 3% expected tail loss).
+    """
+    if len(returns) == 0:
+        return 0.0
+
+    rets = np.asarray(returns, dtype=np.float64)
+    losses = -rets
+    var_threshold = float(np.percentile(losses, (1.0 - alpha) * 100.0))
+    tail_losses = losses[losses >= var_threshold]
+    if len(tail_losses) == 0:
+        return float(max(0.0, var_threshold))
+    return float(max(0.0, np.mean(tail_losses)))
+
+
+def calculate_indian_market_friction(
+    buy_value: float,
+    sell_value: float,
+    stt_rate: float = 0.001,
+    stamp_duty_rate: float = 0.00015,
+    brokerage_rate: float = 0.0002,
+    exchange_rate: float = 0.0000325,
+    sebi_rate: float = 0.000001,
+    gst_rate: float = 0.18,
+) -> tuple[float, dict[str, float]]:
+    """Calculates realistic asymmetric Indian market trading frictions.
+
+    Components:
+        - STT (Securities Transaction Tax): 0.1% on SELL turnover only (equity delivery).
+        - Stamp Duty: 0.015% on BUY turnover only.
+        - Brokerage: Commission on total turnover (buy + sell).
+        - Exchange & SEBI charges: Regulatory fees on turnover.
+        - GST: 18% on service charges (brokerage + exchange charges + SEBI charges).
+
+    Args:
+        buy_value: Total rupee value of asset purchases.
+        sell_value: Total rupee value of asset sales.
+        stt_rate: STT rate applied only to sell_value (default: 0.001 / 0.1%).
+        stamp_duty_rate: Stamp duty rate applied only to buy_value (default: 0.00015 / 0.015%).
+        brokerage_rate: Brokerage rate applied to total turnover (default: 0.0002 / 0.02%).
+        exchange_rate: Exchange transaction fee rate (default: 0.0000325 / 0.00325%).
+        sebi_rate: SEBI turnover fee rate (default: 0.000001 / 0.0001%).
+        gst_rate: Goods and Services Tax rate applied to service charges (default: 0.18 / 18%).
+
+    Returns:
+        total_cost: Total rupee cost of all frictions.
+        breakdown: Dictionary detailing each friction component.
+    """
+    buy_val = max(0.0, float(buy_value))
+    sell_val = max(0.0, float(sell_value))
+    turnover = buy_val + sell_val
+
+    # Asymmetric regulatory taxes
+    stt = sell_val * float(stt_rate)
+    stamp_duty = buy_val * float(stamp_duty_rate)
+
+    # Turnover service fees
+    brokerage = turnover * float(brokerage_rate)
+    exchange_fee = turnover * float(exchange_rate)
+    sebi_fee = turnover * float(sebi_rate)
+
+    # GST on service charges
+    service_charges = brokerage + exchange_fee + sebi_fee
+    gst = service_charges * float(gst_rate)
+
+    total_cost = stt + stamp_duty + service_charges + gst
+
+    breakdown = {
+        "stt": float(stt),
+        "stamp_duty": float(stamp_duty),
+        "brokerage": float(brokerage),
+        "exchange_fee": float(exchange_fee),
+        "sebi_fee": float(sebi_fee),
+        "gst": float(gst),
+        "total_friction": float(total_cost),
+    }
+    return float(total_cost), breakdown
+
+
 class IndiaMarketTradingEnv(gym.Env):
     """Custom Gymnasium Environment for Risk-Adjusted DRL Trading on Indian Indices.
 
@@ -19,7 +111,8 @@ class IndiaMarketTradingEnv(gym.Env):
         to ensure non-negative weights that sum to 1.0.
 
     Reward:
-        Risk-adjusted reward based on a rolling Sharpe Ratio approximation.
+        Direct optimization of terminal wealth penalized by full-period CVaR
+        (Conditional Value at Risk).
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 30}
@@ -32,6 +125,12 @@ class IndiaMarketTradingEnv(gym.Env):
         initial_capital: float = 100000.0,
         reward_window: int = 20,
         include_cash: bool = False,
+        risk_free_rate: float = 0.065,
+        use_indian_friction: bool = False,
+        cvar_alpha: float = 0.05,
+        cvar_lambda: float = 1.0,
+        reward_mode: str = "differential",
+        reward_clip: float | None = None,
         render_mode: str | None = None,
     ):
         super().__init__()
@@ -54,10 +153,12 @@ class IndiaMarketTradingEnv(gym.Env):
         if self.prices.ndim == 1:
             self.prices = self.prices.reshape(-1, 1)
 
-        # Support cash allocation (constant price proxy) for single-asset index trading
+        # Support cash allocation (compounding risk-free proxy) for single-asset index trading
         self.include_cash = include_cash
+        self.risk_free_rate = float(risk_free_rate)
         if self.include_cash and self.prices.shape[1] == 1:
-            cash_col = np.full((len(self.prices), 1), 1.0, dtype=np.float32)
+            t = np.arange(len(self.prices), dtype=np.float64).reshape(-1, 1)
+            cash_col = ((1.0 + self.risk_free_rate / 252.0) ** t).astype(np.float32)
             self.prices = np.hstack([self.prices, cash_col])
 
         if len(self.df_features) != len(self.prices):
@@ -71,6 +172,11 @@ class IndiaMarketTradingEnv(gym.Env):
         self.tc = float(transaction_cost_pct)
         self.initial_capital = float(initial_capital)
         self.reward_window = int(reward_window)
+        self.use_indian_friction = bool(use_indian_friction)
+        self.cvar_alpha = float(cvar_alpha)
+        self.cvar_lambda = float(cvar_lambda)
+        self.reward_mode = str(reward_mode).lower()
+        self.reward_clip = float(reward_clip) if reward_clip is not None else None
         self.render_mode = render_mode
 
         # Action space: Portfolio weights (Continuous simplex in [0, 1])
@@ -109,6 +215,7 @@ class IndiaMarketTradingEnv(gym.Env):
         self.weights = np.zeros(self.n_assets, dtype=np.float32)
         self.weights[0] = 1.0
         self.portfolio_returns = []
+        self.prev_objective = 0.0
 
         obs = self._get_observation()
         info = {
@@ -167,7 +274,17 @@ class IndiaMarketTradingEnv(gym.Env):
 
         # Calculate turnover and transaction cost friction
         turnover = float(np.sum(np.abs(target_weights - self.weights)))
-        cost = turnover * self.tc * self.portfolio_value
+
+        if self.use_indian_friction:
+            # When cash is included, cash asset (last column) is exempt from STT/stamp duty
+            risky_end = (self.n_assets - 1) if self.include_cash else self.n_assets
+            risky_delta = target_weights[:risky_end] - self.weights[:risky_end]
+            buy_val = float(np.sum(np.maximum(risky_delta, 0.0))) * self.portfolio_value
+            sell_val = float(np.sum(np.maximum(-risky_delta, 0.0))) * self.portfolio_value
+            cost, friction_breakdown = calculate_indian_market_friction(buy_val, sell_val)
+        else:
+            cost = turnover * self.tc * self.portfolio_value
+            friction_breakdown = {}
 
         # Move to next price step
         self.current_step += 1
@@ -196,9 +313,10 @@ class IndiaMarketTradingEnv(gym.Env):
         self.portfolio_returns.append(portfolio_return)
         self.weights = target_weights
 
-        # Risk-adjusted reward (rolling Sharpe ratio approximation)
-        reward = self._calculate_reward(portfolio_return)
+        # Risk-adjusted reward: direct optimization of terminal wealth penalized by full-period CVaR
+        reward = self._calculate_reward(portfolio_return, terminated=terminated)
 
+        cvar_loss = calculate_cvar(self.portfolio_returns, alpha=self.cvar_alpha)
         obs = self._get_observation()
         info = {
             "step": self.current_step,
@@ -208,49 +326,47 @@ class IndiaMarketTradingEnv(gym.Env):
             "transaction_cost": float(cost),
             "weights": self.weights.copy(),
             "reward": float(reward),
+            "cvar": float(cvar_loss),
+            "terminal_wealth_ratio": float(self.portfolio_value / self.initial_capital),
         }
+        if self.use_indian_friction:
+            info["friction_breakdown"] = friction_breakdown
 
         return obs, float(reward), terminated, truncated, info
 
-    def _calculate_reward(self, current_return: float) -> float:
-        """Calculates risk-adjusted reward based on an IMPROVISED rolling Sortino ratio."""
-        if len(self.portfolio_returns) >= self.reward_window:
-            recent_returns = np.array(self.portfolio_returns[-self.reward_window :], dtype=np.float64)
-            mean_return = float(np.mean(recent_returns))
+    def _calculate_reward(self, current_return: float, terminated: bool = False) -> float:
+        """Calculates reward directly optimizing terminal wealth penalized by full-period CVaR.
 
-            # --- SHARPE RATIO (COMMENTED OUT) ---
-            # std = float(np.std(recent_returns))
-            # if std < 1e-8: return float(np.clip(mean_return, -1.0, 1.0))
-            # sharpe = mean_return / std
-            # return float(np.clip(sharpe, -10.0, 10.0))
+        Replaces clipped rolling Sortino with direct optimization of terminal wealth penalized
+        by full-period Conditional Value at Risk (CVaR / Expected Shortfall).
 
-            # --- IMPROVISED SORTINO RATIO (ACTIVE) ---
-            # 1. Define Minimum Acceptable Return (MAR).
-            # In finance, MAR is often the risk-free rate, but 0 is standard for daily DRL.
-            mar = 0.0
+        Objective:
+            U_t = (W_t - W_0) / W_0 - lambda * CVaR_alpha(returns_{1:t})
 
-            # 2. Calculate Downside Deviations (How much each day fell below MAR)
-            # We use np.maximum to isolate only the negative deviations
-            downside_deviations = np.maximum(mar - recent_returns, 0.0)
+        Reward mode:
+            - 'differential': r_t = U_t - U_{t-1}, whose telescoping sum over the episode
+              identically equals the terminal penalized wealth U_T:
+              sum_{t=1}^T r_t = U_T - U_0 = (W_T - W_0) / W_0 - lambda * CVaR(R_{1:T})
+              while providing dense step-wise learning signals to the agent.
+            - 'terminal': r_t = U_T at termination, 0.0 otherwise.
+        """
+        wealth_return = (self.portfolio_value - self.initial_capital) / self.initial_capital
+        cvar_loss = calculate_cvar(self.portfolio_returns, alpha=self.cvar_alpha)
+        current_objective = wealth_return - self.cvar_lambda * cvar_loss
 
-            # 3. Calculate Semi-Deviation (The mathematically correct Sortino denominator)
-            # Formula: sqrt( mean( downside_deviations^2 ) )
-            squared_downside = downside_deviations**2
-            semi_deviation = float(np.sqrt(np.mean(squared_downside)))
+        if self.reward_mode == "terminal":
+            reward = current_objective if terminated else 0.0
+        else:
+            reward = current_objective - self.prev_objective
+            self.prev_objective = current_objective
 
-            # 4. Smoothing Factor (Epsilon)
-            # This is the "Improvisation". It prevents division by zero and stops
-            # the reward from exploding during low-volatility bull markets.
-            epsilon = 1e-4
+        if not np.isfinite(reward):
+            return 0.0
 
-            # 5. Calculate Sortino
-            sortino = mean_return / (semi_deviation + epsilon)
+        if self.reward_clip is not None:
+            reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
 
-            # 6. Clip the reward to stabilize PPO neural network training
-            return float(np.clip(sortino, -5.0, 5.0))
-
-        # Insufficient return history: use immediate net return
-        return float(current_return)
+        return float(reward)
 
     def render(self) -> None:
         if self.render_mode == "human" or self.render_mode is None:

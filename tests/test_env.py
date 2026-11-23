@@ -217,7 +217,7 @@ def test_include_cash_allocation():
     # Single index price increasing from 100 to 200
     prices = pd.DataFrame(np.linspace(100.0, 200.0, 10).reshape(-1, 1))
 
-    env = IndiaMarketTradingEnv(features, prices, include_cash=True)
+    env = IndiaMarketTradingEnv(features, prices, include_cash=True, risk_free_rate=0.0)
     obs, info = env.reset()
 
     # Cash asset added: n_assets == 2 (Index and Cash)
@@ -229,7 +229,7 @@ def test_include_cash_allocation():
     obs, reward, term, trunc, info = env.step(np.array([0.0, 1.0]))
     # Keep holding 100% cash
     obs, reward, term, trunc, info = env.step(np.array([0.0, 1.0]))
-    # Turnover is 0 and cash return is 0
+    # Turnover is 0 and cash return is 0 when risk_free_rate=0.0
     assert np.isclose(info["turnover"], 0.0)
     assert np.isclose(info["portfolio_return"], 0.0)
 
@@ -237,8 +237,82 @@ def test_include_cash_allocation():
     check_env(env)
 
 
+def test_interest_bearing_cash_proxy_compounding():
+    features = pd.DataFrame(np.zeros((10, 2)))
+    prices = pd.DataFrame(np.full((10, 1), 100.0))  # flat stock price
+
+    rf = 0.065
+    daily_rf = rf / 252.0
+    env = IndiaMarketTradingEnv(features, prices, include_cash=True, risk_free_rate=rf)
+    env.reset()
+
+    # Cash price column should compound as 1.0 * (1 + 0.065/252)^t
+    expected_cash_col = (1.0 + daily_rf) ** np.arange(10, dtype=np.float64)
+    assert np.allclose(env.prices[:, 1], expected_cash_col, atol=1e-5)
+
+    # Step 1: Allocate 100% to cash
+    env.step(np.array([0.0, 1.0]))
+
+    # Step 2: Hold 100% cash, zero turnover, return should match daily risk-free rate
+    _, _, _, _, info = env.step(np.array([0.0, 1.0]))
+    assert np.isclose(info["turnover"], 0.0)
+    assert np.isclose(info["portfolio_return"], daily_rf, atol=1e-6)
+
+
+def test_calculate_indian_market_friction_asymmetry():
+    from envs.india_trading_env import calculate_indian_market_friction
+
+    # Buy only: ₹100,000 buy, ₹0 sell
+    cost_buy, breakdown_buy = calculate_indian_market_friction(buy_value=100000.0, sell_value=0.0)
+    assert breakdown_buy["stt"] == 0.0  # STT is sell only
+    assert np.isclose(breakdown_buy["stamp_duty"], 15.0)  # 0.015% of 100k
+    assert np.isclose(breakdown_buy["brokerage"], 20.0)  # 0.02% of 100k
+    assert np.isclose(breakdown_buy["exchange_fee"], 3.25)  # 0.00325% of 100k
+    assert np.isclose(breakdown_buy["sebi_fee"], 0.10)  # 0.0001% of 100k
+    service_charges_buy = 20.0 + 3.25 + 0.10
+    assert np.isclose(breakdown_buy["gst"], service_charges_buy * 0.18)
+    assert np.isclose(cost_buy, 15.0 + service_charges_buy * 1.18)
+
+    # Sell only: ₹0 buy, ₹100,000 sell
+    cost_sell, breakdown_sell = calculate_indian_market_friction(buy_value=0.0, sell_value=100000.0)
+    assert np.isclose(breakdown_sell["stt"], 100.0)  # 0.1% STT on sell
+    assert breakdown_sell["stamp_duty"] == 0.0  # Stamp duty is buy only
+    assert np.isclose(breakdown_sell["brokerage"], 20.0)
+    assert np.isclose(breakdown_sell["exchange_fee"], 3.25)
+    assert np.isclose(breakdown_sell["sebi_fee"], 0.10)
+    service_charges_sell = 20.0 + 3.25 + 0.10
+    assert np.isclose(breakdown_sell["gst"], service_charges_sell * 0.18)
+    assert np.isclose(cost_sell, 100.0 + service_charges_sell * 1.18)
+
+    # Selling has higher friction than buying due to STT asymmetry
+    assert cost_sell > cost_buy
+
+
+def test_env_with_indian_market_friction():
+    features = pd.DataFrame(np.zeros((3, 2)))
+    # Day 0: [100, 100], Day 1: [100, 100], Day 2: [100, 100] (flat prices)
+    prices = pd.DataFrame([[100.0, 100.0], [100.0, 100.0], [100.0, 100.0]])
+
+    env = IndiaMarketTradingEnv(
+        features,
+        prices,
+        initial_capital=100000.0,
+        use_indian_friction=True,
+    )
+    env.reset()
+    # At reset: weights = [1.0, 0.0]. We switch 50% to asset 1: sell 50k of asset 0, buy 50k of asset 1
+    obs, reward, terminated, truncated, info = env.step(np.array([0.5, 0.5]))
+
+    assert "friction_breakdown" in info
+    fb = info["friction_breakdown"]
+    assert np.isclose(fb["stt"], 50000.0 * 0.001)  # STT on 50k sold
+    assert np.isclose(fb["stamp_duty"], 50000.0 * 0.00015)  # Stamp duty on 50k bought
+    assert info["transaction_cost"] == fb["total_friction"]
+    assert env.portfolio_value < 100000.0
+
+
 def test_performance_metrics_calculation():
-    from envs.metrics import calculate_performance_metrics
+    from envs.metrics import calculate_cvar, calculate_performance_metrics
 
     # Test portfolio values and returns
     values = np.array([100.0, 105.0, 110.0, 100.0, 120.0])
@@ -250,3 +324,75 @@ def test_performance_metrics_calculation():
     assert np.isclose(metrics["max_drawdown_pct"], (10.0 / 110.0) * 100.0, rtol=1e-3)
     assert np.isfinite(metrics["annualized_sharpe"])
     assert np.isfinite(metrics["annualized_sortino"])
+    assert np.isfinite(metrics["cvar_pct"])
+    assert metrics["cvar_pct"] >= 0.0
+
+    # Test standalone calculate_cvar
+    cvar_val = calculate_cvar(np.array([-0.05, -0.02, 0.01, 0.03]), alpha=0.25)
+    assert np.isclose(cvar_val, 5.0)  # worst 25% tail is -0.05 -> loss is 5.0%
+
+
+def test_terminal_wealth_penalized_cvar_reward():
+    from envs.india_trading_env import calculate_cvar
+
+    # 10 steps of price movements
+    np.random.seed(42)
+    features = pd.DataFrame(np.zeros((10, 2)))
+    prices = pd.DataFrame(np.linspace(100.0, 110.0, 10).reshape(-1, 1))
+
+    cvar_lambda = 1.5
+    cvar_alpha = 0.10
+    env = IndiaMarketTradingEnv(
+        features,
+        prices,
+        transaction_cost_pct=0.0,
+        cvar_alpha=cvar_alpha,
+        cvar_lambda=cvar_lambda,
+        reward_mode="differential",
+    )
+    env.reset()
+
+    total_reward = 0.0
+    done = False
+    while not done:
+        _, reward, terminated, truncated, info = env.step(np.array([1.0]))
+        total_reward += reward
+        done = terminated or truncated
+
+    # Differential reward telescoping sum should match terminal penalized wealth:
+    # sum(r_t) == (W_T - W_0) / W_0 - lambda * CVaR(R_{1:T})
+    expected_wealth_return = (env.portfolio_value - env.initial_capital) / env.initial_capital
+    expected_cvar = calculate_cvar(env.portfolio_returns, alpha=cvar_alpha)
+    expected_objective = expected_wealth_return - cvar_lambda * expected_cvar
+
+    assert np.isclose(total_reward, expected_objective, atol=1e-5)
+    assert np.isclose(info["cvar"], expected_cvar, atol=1e-5)
+
+
+def test_terminal_mode_reward():
+    from envs.india_trading_env import calculate_cvar
+
+    features = pd.DataFrame(np.zeros((5, 2)))
+    prices = pd.DataFrame(np.linspace(100.0, 120.0, 5).reshape(-1, 1))
+
+    env = IndiaMarketTradingEnv(
+        features,
+        prices,
+        reward_mode="terminal",
+        cvar_lambda=1.0,
+    )
+    env.reset()
+
+    # Intermediate steps should yield 0.0 reward
+    for _ in range(3):
+        _, reward, term, _, _ = env.step(np.array([1.0]))
+        assert not term
+        assert reward == 0.0
+
+    # Final step yields full terminal objective
+    _, reward_final, term_final, _, _ = env.step(np.array([1.0]))
+    assert term_final
+    expected_wealth_return = (env.portfolio_value - env.initial_capital) / env.initial_capital
+    expected_cvar = calculate_cvar(env.portfolio_returns, alpha=0.05)
+    expected_terminal_reward = expected_wealth_return - 1.0 * expected_cvar
+    assert np.isclose(reward_final, expected_terminal_reward, atol=1e-5)
