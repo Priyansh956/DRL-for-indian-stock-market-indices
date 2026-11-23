@@ -96,6 +96,7 @@ class IndiaMarketTradingEnv(gym.Env):
         initial_capital: float = 100000.0,
         reward_window: int = 20,
         include_cash: bool = False,
+        risk_free_rate: float = 0.065,
         use_indian_friction: bool = False,
         render_mode: str | None = None,
     ):
@@ -119,10 +120,12 @@ class IndiaMarketTradingEnv(gym.Env):
         if self.prices.ndim == 1:
             self.prices = self.prices.reshape(-1, 1)
 
-        # Support cash allocation (constant price proxy) for single-asset index trading
+        # Support cash allocation (compounding risk-free proxy) for single-asset index trading
         self.include_cash = include_cash
+        self.risk_free_rate = float(risk_free_rate)
         if self.include_cash and self.prices.shape[1] == 1:
-            cash_col = np.full((len(self.prices), 1), 1.0, dtype=np.float32)
+            t = np.arange(len(self.prices), dtype=np.float64).reshape(-1, 1)
+            cash_col = ((1.0 + self.risk_free_rate / 252.0) ** t).astype(np.float32)
             self.prices = np.hstack([self.prices, cash_col])
 
         if len(self.df_features) != len(self.prices):

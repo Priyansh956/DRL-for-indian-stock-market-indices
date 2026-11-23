@@ -217,7 +217,7 @@ def test_include_cash_allocation():
     # Single index price increasing from 100 to 200
     prices = pd.DataFrame(np.linspace(100.0, 200.0, 10).reshape(-1, 1))
 
-    env = IndiaMarketTradingEnv(features, prices, include_cash=True)
+    env = IndiaMarketTradingEnv(features, prices, include_cash=True, risk_free_rate=0.0)
     obs, info = env.reset()
 
     # Cash asset added: n_assets == 2 (Index and Cash)
@@ -229,12 +229,34 @@ def test_include_cash_allocation():
     obs, reward, term, trunc, info = env.step(np.array([0.0, 1.0]))
     # Keep holding 100% cash
     obs, reward, term, trunc, info = env.step(np.array([0.0, 1.0]))
-    # Turnover is 0 and cash return is 0
+    # Turnover is 0 and cash return is 0 when risk_free_rate=0.0
     assert np.isclose(info["turnover"], 0.0)
     assert np.isclose(info["portfolio_return"], 0.0)
 
     # SB3 compatibility with include_cash=True
     check_env(env)
+
+
+def test_interest_bearing_cash_proxy_compounding():
+    features = pd.DataFrame(np.zeros((10, 2)))
+    prices = pd.DataFrame(np.full((10, 1), 100.0))  # flat stock price
+
+    rf = 0.065
+    daily_rf = rf / 252.0
+    env = IndiaMarketTradingEnv(features, prices, include_cash=True, risk_free_rate=rf)
+    env.reset()
+
+    # Cash price column should compound as 1.0 * (1 + 0.065/252)^t
+    expected_cash_col = (1.0 + daily_rf) ** np.arange(10, dtype=np.float64)
+    assert np.allclose(env.prices[:, 1], expected_cash_col, atol=1e-5)
+
+    # Step 1: Allocate 100% to cash
+    env.step(np.array([0.0, 1.0]))
+
+    # Step 2: Hold 100% cash, zero turnover, return should match daily risk-free rate
+    _, _, _, _, info = env.step(np.array([0.0, 1.0]))
+    assert np.isclose(info["turnover"], 0.0)
+    assert np.isclose(info["portfolio_return"], daily_rf, atol=1e-6)
 
 
 def test_calculate_indian_market_friction_asymmetry():
