@@ -311,9 +311,8 @@ def test_env_with_indian_market_friction():
     assert env.portfolio_value < 100000.0
 
 
-
 def test_performance_metrics_calculation():
-    from envs.metrics import calculate_performance_metrics
+    from envs.metrics import calculate_cvar, calculate_performance_metrics
 
     # Test portfolio values and returns
     values = np.array([100.0, 105.0, 110.0, 100.0, 120.0])
@@ -325,3 +324,75 @@ def test_performance_metrics_calculation():
     assert np.isclose(metrics["max_drawdown_pct"], (10.0 / 110.0) * 100.0, rtol=1e-3)
     assert np.isfinite(metrics["annualized_sharpe"])
     assert np.isfinite(metrics["annualized_sortino"])
+    assert np.isfinite(metrics["cvar_pct"])
+    assert metrics["cvar_pct"] >= 0.0
+
+    # Test standalone calculate_cvar
+    cvar_val = calculate_cvar(np.array([-0.05, -0.02, 0.01, 0.03]), alpha=0.25)
+    assert np.isclose(cvar_val, 5.0)  # worst 25% tail is -0.05 -> loss is 5.0%
+
+
+def test_terminal_wealth_penalized_cvar_reward():
+    from envs.india_trading_env import calculate_cvar
+
+    # 10 steps of price movements
+    np.random.seed(42)
+    features = pd.DataFrame(np.zeros((10, 2)))
+    prices = pd.DataFrame(np.linspace(100.0, 110.0, 10).reshape(-1, 1))
+
+    cvar_lambda = 1.5
+    cvar_alpha = 0.10
+    env = IndiaMarketTradingEnv(
+        features,
+        prices,
+        transaction_cost_pct=0.0,
+        cvar_alpha=cvar_alpha,
+        cvar_lambda=cvar_lambda,
+        reward_mode="differential",
+    )
+    env.reset()
+
+    total_reward = 0.0
+    done = False
+    while not done:
+        _, reward, terminated, truncated, info = env.step(np.array([1.0]))
+        total_reward += reward
+        done = terminated or truncated
+
+    # Differential reward telescoping sum should match terminal penalized wealth:
+    # sum(r_t) == (W_T - W_0) / W_0 - lambda * CVaR(R_{1:T})
+    expected_wealth_return = (env.portfolio_value - env.initial_capital) / env.initial_capital
+    expected_cvar = calculate_cvar(env.portfolio_returns, alpha=cvar_alpha)
+    expected_objective = expected_wealth_return - cvar_lambda * expected_cvar
+
+    assert np.isclose(total_reward, expected_objective, atol=1e-5)
+    assert np.isclose(info["cvar"], expected_cvar, atol=1e-5)
+
+
+def test_terminal_mode_reward():
+    from envs.india_trading_env import calculate_cvar
+
+    features = pd.DataFrame(np.zeros((5, 2)))
+    prices = pd.DataFrame(np.linspace(100.0, 120.0, 5).reshape(-1, 1))
+
+    env = IndiaMarketTradingEnv(
+        features,
+        prices,
+        reward_mode="terminal",
+        cvar_lambda=1.0,
+    )
+    env.reset()
+
+    # Intermediate steps should yield 0.0 reward
+    for _ in range(3):
+        _, reward, term, _, _ = env.step(np.array([1.0]))
+        assert not term
+        assert reward == 0.0
+
+    # Final step yields full terminal objective
+    _, reward_final, term_final, _, _ = env.step(np.array([1.0]))
+    assert term_final
+    expected_wealth_return = (env.portfolio_value - env.initial_capital) / env.initial_capital
+    expected_cvar = calculate_cvar(env.portfolio_returns, alpha=0.05)
+    expected_terminal_reward = expected_wealth_return - 1.0 * expected_cvar
+    assert np.isclose(reward_final, expected_terminal_reward, atol=1e-5)

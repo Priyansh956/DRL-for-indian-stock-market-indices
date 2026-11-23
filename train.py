@@ -283,6 +283,7 @@ def main() -> None:
     print(f"{'Maximum Drawdown (%)':<30} | {agent_metrics['max_drawdown_pct']:>16.2f}% | {bh_metrics['max_drawdown_pct']:>16.2f}%")
     print(f"{'Annualized Sharpe Ratio':<30} | {agent_metrics['annualized_sharpe']:>17.2f} | {bh_metrics['annualized_sharpe']:>17.2f}")
     print(f"{'Annualized Sortino Ratio':<30} | {agent_metrics['annualized_sortino']:>17.2f} | {bh_metrics['annualized_sortino']:>17.2f}")
+    print(f"{'CVaR (95% Tail Loss %)':<30} | {agent_metrics['cvar_pct']:>16.2f}% | {bh_metrics['cvar_pct']:>16.2f}%")
     print("=" * 70)
 
     # 7. Generate Demonstration Plot
